@@ -2,7 +2,7 @@
 
 Strategy (long only, one position, low turnover):
 
-- Track an EMA of the last SPAN closes (about 6 hours). The EMA is seeded
+- Track an EMA of the last SPAN closes (about 7 hours). The EMA is seeded
   with the simple mean of its first SPAN closes, warm-up bars included, so
   the anchor is ready as early as the data allows.
 - Buy with (nearly) all cash when the latest close falls DIP (0.6%) or more
@@ -10,10 +10,14 @@ Strategy (long only, one position, low turnover):
   historically been liquidity dislocations that recover, and a single
   round trip costs roughly 0.3% in fees, slippage and impact, so the dip
   has to be at least twice that to be worth taking.
-- Sell the whole position when the close recovers to TARGET (0.4%) above
-  the EMA, when it falls STOP (1.5%) below the close the entry was decided
-  on (the dip was a real downtrend, not a dislocation), or after MAX_HOLD
-  bars in the position without a recovery (dead money goes back to cash).
+- Do not sell into the recovery: when the close reaches TARGET (0.4%)
+  above the EMA the runner arms, and the position is sold when the close
+  then falls TRAIL (0.2%) below its highest close since arming, or back
+  under a quarter of the target band. Two guards override everything:
+  sell when the close falls STOP (1.5%) below the close the entry was
+  decided on (the dip was a real downtrend, not a dislocation), or after
+  MAX_HOLD bars in the position without a recovery (dead money goes back
+  to cash).
 - After an exit, wait COOLDOWN bars before re-entering, so one dislocation
   is traded once, not churned.
 
@@ -29,9 +33,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ven
 import makefun_bars
 
 SYMBOL = "CBBTC"
-SPAN = 360          # EMA span in bars (~6 hours of 1-minute bars)
+SPAN = 420          # EMA span in bars (~7 hours of 1-minute bars)
 DIP = 0.006         # buy when close < EMA * (1 - DIP)
-TARGET = 0.004      # sell when close >= EMA * (1 + TARGET)
+TARGET = 0.004      # recovery level: close >= EMA * (1 + TARGET) arms the runner
+TRAIL = 0.002       # once armed, sell when close < peak close * (1 - TRAIL)
 STOP = 0.015        # sell when close < entry close * (1 - STOP)
 MAX_HOLD = 720      # sell after this many bars in the position
 COOLDOWN = 120      # bars to sit out after an exit
@@ -47,6 +52,8 @@ class DipBot:
         self.buy_pending = False  # a buy was sent last batch, fill not yet seen
         self.was_held = False     # the account held the symbol on the previous batch
         self.last_exit_seq = -10 ** 9
+        self.armed = False        # the recovery target was reached: the runner is trailing
+        self.peak = None          # highest close since the runner armed (float, raw units)
 
     def step_indicators(self, batch):
         for bar in batch["bars"]:
@@ -73,10 +80,14 @@ class DipBot:
                 # The buy was rejected: forget the entry.
                 self.entry_seq = None
                 self.entry_close = None
+                self.armed = False
+                self.peak = None
         if held is None and self.was_held:
             self.last_exit_seq = state.seq
             self.entry_seq = None
             self.entry_close = None
+            self.armed = False
+            self.peak = None
         self.was_held = held is not None
 
         if state.warming_up or close is None or self.ema is None:
@@ -87,12 +98,22 @@ class DipBot:
                 # Defensive: a position we do not remember opening.
                 self.entry_seq = state.seq
                 self.entry_close = float(close)
-            if close >= self.ema * (1.0 + TARGET):
-                return [self.sell(state, held.qty)]
             if close < self.entry_close * (1.0 - STOP):
                 return [self.sell(state, held.qty)]
             if state.seq - self.entry_seq >= MAX_HOLD:
                 return [self.sell(state, held.qty)]
+            if self.armed:
+                if close > self.peak:
+                    self.peak = float(close)
+                if close < self.peak * (1.0 - TRAIL) or close < self.ema * (1.0 + TARGET * 0.25):
+                    return [self.sell(state, held.qty)]
+                return None
+            if close >= self.ema * (1.0 + TARGET):
+                # Recovery reached: do not sell into strength. Arm the
+                # runner and let the trailing exit decide.
+                self.armed = True
+                self.peak = float(close)
+                return None
             return None
 
         # Flat: look for the next dip.
@@ -105,6 +126,8 @@ class DipBot:
             self.entry_seq = state.seq
             self.entry_close = float(close)
             self.buy_pending = True
+            self.armed = False
+            self.peak = None
             return [{
                 "side": "buy",
                 "symbol": SYMBOL,

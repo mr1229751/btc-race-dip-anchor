@@ -12,15 +12,18 @@ structure: a round trip at full size costs roughly 0.3% in fees, modelled
 slippage and price impact, so the bot trades rarely and only when the
 expected recovery is comfortably larger than the cost of trading.
 
-- It keeps an EMA of the last 360 closes (about 6 hours), seeded with the
-  simple mean of its first 360 closes, warm-up bars included.
+- It keeps an EMA of the last 420 closes (about 7 hours), seeded with the
+  simple mean of its first 420 closes, warm-up bars included.
 - **Entry:** when the latest close falls 0.6% or more below the EMA, it
   buys with (nearly) all its cash. On this pool, multi-hour dips below the
   running mean have tended to be liquidity dislocations that recover.
-- **Exit:** it sells the whole position when the close recovers to 0.4%
-  above the EMA; or when the close falls 1.5% below the close the entry
-  was decided on (the dip was a genuine downtrend, not a dislocation); or
-  after 720 bars in the position without a recovery.
+- **Exit:** it does not sell into the recovery. When the close reaches
+  0.4% above the EMA a trailing runner arms, and the position is sold
+  when the close then falls 0.2% below its highest close since arming
+  (or back under a quarter of that band). Two guards override: a sale
+  when the close falls 1.5% below the close the entry was decided on
+  (the dip was a genuine downtrend, not a dislocation), and a sale after
+  720 bars in the position without a recovery.
 - After an exit it sits out 120 bars, so one dislocation is traded once
   instead of being churned. Every order caps its slippage at 500 bps
   against the latest close.
